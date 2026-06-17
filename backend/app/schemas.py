@@ -29,6 +29,15 @@ class CompanyOverview(BaseModel):
     summary: str
 
 
+class Contact(BaseModel):
+    """关键联系人 — a likely decision-maker from the find_decision_makers tool."""
+
+    name: str
+    title: str
+    linkedin: Optional[str] = None
+    note: Optional[str] = None
+
+
 class TraceStep(BaseModel):
     """One entry in the agent's tool-call / thinking trace.
 
@@ -54,6 +63,7 @@ class LeadBrief(BaseModel):
     pain_points: list[str]
     outreach_angles: list[str]
     outreach_opener: str
+    key_contacts: list[Contact] = Field(default_factory=list)
     trace: list[TraceStep] = Field(default_factory=list)
     # True when the deterministic stub ran (no ANTHROPIC_API_KEY); surfaced so
     # the UI and reviewer can tell which path produced the result.

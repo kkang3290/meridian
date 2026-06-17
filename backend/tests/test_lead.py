@@ -12,7 +12,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # force the stub path
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.services.tools import search_company  # noqa: E402
+from app.services.tools import find_decision_makers, search_company  # noqa: E402
 
 client = TestClient(app)
 
@@ -20,7 +20,10 @@ client = TestClient(app)
 def test_health_reports_stub():
     res = client.get("/api/health")
     assert res.status_code == 200
-    assert res.json() == {"status": "ok", "llm": "stub"}
+    body = res.json()
+    assert body["status"] == "ok"
+    assert body["llm"] == "stub"
+    assert "version" in body
 
 
 def test_lead_returns_full_contract():
@@ -41,14 +44,21 @@ def test_lead_returns_full_contract():
     assert body["company_overview"]["name"] == "Northwind Logistics"
     assert body["pain_points"] and body["outreach_angles"]
     assert isinstance(body["outreach_opener"], str) and body["outreach_opener"]
+    # Second tool feeds key_contacts.
+    assert body["key_contacts"], "expected at least one decision-maker"
+    assert {"name", "title"} <= set(body["key_contacts"][0])
 
 
-def test_trace_shows_a_tool_call_cycle():
+def test_trace_shows_both_tools():
     body = client.post("/api/lead", json={"input": "Aurora Outdoor"}).json()
-    types = [step["type"] for step in body["trace"]]
-    # The agent must demonstrate calling the tool and integrating its result.
-    assert "tool_call" in types
-    assert "tool_result" in types
+    trace = body["trace"]
+    types = [step["type"] for step in trace]
+    labels = " ".join(step["label"] for step in trace)
+    # The agent must demonstrate a multi-tool loop: call + result for each tool.
+    assert "search_company" in labels
+    assert "find_decision_makers" in labels
+    assert types.count("tool_call") >= 2
+    assert types.count("tool_result") >= 2
     assert types[-1] == "final"
 
 
@@ -65,3 +75,13 @@ def test_search_company_url_parsing():
 
 def test_search_company_is_deterministic():
     assert search_company("Some Unknown Co") == search_company("Some Unknown Co")
+
+
+def test_find_decision_makers_returns_contacts():
+    seeded = find_decision_makers("Northwind Logistics")
+    assert seeded["contacts"], "seeded company should have contacts"
+    assert {"name", "title"} <= set(seeded["contacts"][0])
+    # Unknown companies still get deterministic fallback contacts.
+    unknown = find_decision_makers("Some Unknown Co")
+    assert unknown["contacts"]
+    assert unknown == find_decision_makers("Some Unknown Co")

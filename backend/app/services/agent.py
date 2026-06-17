@@ -15,9 +15,23 @@ import json
 from typing import Any
 
 from ..config import MAX_TOKENS, MAX_TOOL_ITERS, MODEL
-from ..schemas import CompanyOverview, LeadBrief, TraceStep
+from ..schemas import CompanyOverview, Contact, LeadBrief, TraceStep
 from .llm import get_client
-from .tools import SEARCH_COMPANY_TOOL, search_company
+from .tools import (
+    FIND_DECISION_MAKERS_TOOL,
+    SEARCH_COMPANY_TOOL,
+    find_decision_makers,
+    search_company,
+)
+
+# Tools advertised to the model, and the name -> executor dispatch the loop uses
+# when the model picks one. Adding a tool is: append its schema here + a row in
+# EXECUTORS; the loop is otherwise tool-agnostic.
+TOOLS = [SEARCH_COMPANY_TOOL, FIND_DECISION_MAKERS_TOOL]
+EXECUTORS = {
+    "search_company": lambda inp, fallback: search_company(inp.get("query", fallback)),
+    "find_decision_makers": lambda inp, fallback: find_decision_makers(inp.get("company", fallback)),
+}
 
 
 class AgentError(Exception):
@@ -33,8 +47,9 @@ SYSTEM_PROMPT = """\
 
 工作方式：
 1. 先调用 search_company 工具收集该公司的事实信息（行业、规模、总部、产品、近期信号等），不要凭空臆测。
-2. 基于工具返回的数据进行推理，识别该公司在「出海 / 增长」过程中可能遇到的真实痛点。
-3. 给出具体、可执行的出海 / 外联切入点，以及一句自然、个性化、非模板化的开场白。
+2. 再调用 find_decision_makers 工具找到该公司值得对接的关键决策人（姓名、职位）。
+3. 基于工具返回的数据进行推理，识别该公司在「出海 / 增长」过程中可能遇到的真实痛点。
+4. 给出具体、可执行的出海 / 外联切入点，以及一句自然、个性化、非模板化的开场白；若已知关键联系人，开场白可自然地点名相关角色。
 
 要求：内容务实、贴近销售场景；痛点要由数据支撑；开场白要像真人写的、能直接发出去。"""
 
@@ -63,8 +78,28 @@ LEAD_BRIEF_SCHEMA: dict[str, Any] = {
         "pain_points": {"type": "array", "items": {"type": "string"}},
         "outreach_angles": {"type": "array", "items": {"type": "string"}},
         "outreach_opener": {"type": "string"},
+        "key_contacts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "title": {"type": "string"},
+                    "linkedin": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                },
+                "required": ["name", "title", "linkedin", "note"],
+                "additionalProperties": False,
+            },
+        },
     },
-    "required": ["company_overview", "pain_points", "outreach_angles", "outreach_opener"],
+    "required": [
+        "company_overview",
+        "pain_points",
+        "outreach_angles",
+        "outreach_opener",
+        "key_contacts",
+    ],
     "additionalProperties": False,
 }
 
@@ -86,13 +121,13 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
         {"role": "user", "content": f"目标公司输入：{user_input}\n\n请研究该公司并准备销售线索简报。"}
     ]
 
-    # Phase 1 — gather: let the model call search_company until it's satisfied.
+    # Phase 1 — gather: let the model call the tools until it's satisfied.
     for _ in range(MAX_TOOL_ITERS):
         response = client.messages.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
-            tools=[SEARCH_COMPANY_TOOL],
+            tools=TOOLS,
             thinking={"type": "adaptive", "display": "summarized"},
             messages=messages,
         )
@@ -118,12 +153,16 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
 
         tool_results = []
         for tu in tool_uses:
-            result = search_company(tu.input.get("query", user_input))
+            executor = EXECUTORS.get(tu.name)
+            if executor is None:
+                result: Any = {"error": f"unknown tool: {tu.name}"}
+            else:
+                result = executor(tu.input, user_input)
             trace.append(
                 TraceStep(
                     type="tool_result",
                     label=f"{tu.name} 返回结果",
-                    detail=result.get("name"),
+                    detail=result.get("name") or result.get("company"),
                     data=result,
                 )
             )
@@ -178,6 +217,7 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
         pain_points=data["pain_points"],
         outreach_angles=data["outreach_angles"],
         outreach_opener=data["outreach_opener"],
+        key_contacts=[Contact(**c) for c in data.get("key_contacts", [])],
         trace=trace,
         used_stub=False,
     )
@@ -191,7 +231,10 @@ def _run_stub(user_input: str) -> LeadBrief:
         TraceStep(
             type="thinking",
             label="模型推理",
-            detail="未配置 ANTHROPIC_API_KEY，使用确定性 stub。先用 search_company 收集事实，再据此撰写简报。",
+            detail=(
+                "未配置 ANTHROPIC_API_KEY，使用确定性 stub。先用 search_company 收集事实，"
+                "再用 find_decision_makers 找关键联系人，最后据此撰写简报。"
+            ),
         ),
         TraceStep(type="tool_call", label="调用工具 search_company", data={"query": user_input}),
     ]
@@ -210,6 +253,20 @@ def _run_stub(user_input: str) -> LeadBrief:
     hq = record.get("headquarters", "")
     products = record.get("products", [])
     signals = record.get("recent_signals", [])
+
+    # Second tool call — mirrors the real multi-tool loop.
+    trace.append(TraceStep(type="tool_call", label="调用工具 find_decision_makers", data={"company": name}))
+    dm = find_decision_makers(name)
+    contacts = [Contact(**c) for c in dm["contacts"]]
+    trace.append(
+        TraceStep(
+            type="tool_result",
+            label="find_decision_makers 返回结果",
+            detail=f"{len(contacts)} 位联系人",
+            data=dm,
+        )
+    )
+    top = contacts[0] if contacts else None
 
     overview = CompanyOverview(
         name=name,
@@ -237,8 +294,9 @@ def _run_stub(user_input: str) -> LeadBrief:
         "用一次小范围试点（如 50 条目标客户 + 自动开场白）证明 ROI，再谈规模化。",
     ]
 
+    greeting = f"你好 {top.name}（{top.title}），" if top else "你好，"
     opener = (
-        f"你好，注意到 {name} 正在{('（' + signals[0] + '）') if signals else ''}加速增长——"
+        f"{greeting}注意到 {name} 正在{('（' + signals[0] + '）') if signals else ''}加速增长——"
         f"我们用 AI Agent 帮{industry or 'B2B'}公司自动化完成海外获客与外联，"
         f"想用 15 分钟聊聊能否为你们的出海管道每周稳定产出一批高质量线索？"
     )
@@ -247,7 +305,7 @@ def _run_stub(user_input: str) -> LeadBrief:
         TraceStep(
             type="final",
             label="生成结构化简报（stub）",
-            data={"note": "由 stub 基于工具返回数据确定性生成"},
+            data={"note": "由 stub 基于两次工具返回数据确定性生成"},
         )
     )
 
@@ -256,6 +314,7 @@ def _run_stub(user_input: str) -> LeadBrief:
         pain_points=pain_points,
         outreach_angles=outreach_angles,
         outreach_opener=opener,
+        key_contacts=contacts,
         trace=trace,
         used_stub=True,
     )

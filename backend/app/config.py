@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Model + agent-loop tuning.
+VERSION = "1.1.0"
 MODEL = "claude-opus-4-8"
 # Shared by adaptive thinking AND the visible output, so keep headroom — a tight
 # cap can truncate the phase-2 JSON (stop_reason "max_tokens") and break parsing.
@@ -23,3 +24,11 @@ MAX_TOOL_ITERS = 4
 def get_api_key() -> str | None:
     """Return the Anthropic API key, or None when it isn't configured."""
     return os.environ.get("ANTHROPIC_API_KEY")
+
+
+def get_cors_origins() -> list[str]:
+    """Allowed CORS origins — comma-separated CORS_ORIGINS env, default '*'."""
+    raw = os.environ.get("CORS_ORIGINS", "*").strip()
+    if not raw or raw == "*":
+        return ["*"]
+    return [o.strip() for o in raw.split(",") if o.strip()]

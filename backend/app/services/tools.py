@@ -1,10 +1,10 @@
-"""The single agent tool: `search_company`.
+"""The agent's tools: `search_company` and `find_decision_makers`.
 
 Per the assignment, the data is mock — the point is to demonstrate the agent
-deciding to call a tool and integrating its result, not the realism of the data.
-A handful of companies are seeded with hand-written profiles; anything else
-gets a deterministic generated record so the agent always has something
-plausible to reason over.
+deciding which tool to call and integrating the results, not the realism of the
+data. A handful of companies are seeded with hand-written profiles/contacts;
+anything else gets a deterministic generated record so the agent always has
+something plausible to reason over.
 """
 
 from __future__ import annotations
@@ -129,13 +129,120 @@ def _generated_record(query: str) -> dict[str, Any]:
     }
 
 
-def search_company(query: str) -> dict[str, Any]:
-    """Return a (mock) firmographic record for a company query."""
+def _match_seed_key(query: str) -> str | None:
+    """Return the seeded company key matching `query`, or None.
+
+    Exact match first, then a loose contains-match so "northwind" finds
+    "northwind logistics". Shared by both tools so they agree on identity.
+    """
     key = query.strip().lower()
     if key in _SEEDED:
-        return _SEEDED[key]
-    # Loose contains-match so "northwind" finds "northwind logistics".
-    for seeded_key, record in _SEEDED.items():
+        return key
+    for seeded_key in _SEEDED:
         if key and (key in seeded_key or seeded_key in key):
-            return record
+            return seeded_key
+    return None
+
+
+def search_company(query: str) -> dict[str, Any]:
+    """Return a (mock) firmographic record for a company query."""
+    seed_key = _match_seed_key(query)
+    if seed_key is not None:
+        return _SEEDED[seed_key]
     return _generated_record(query)
+
+
+# --------------------------------------------------------------------------- #
+# Tool 2: find_decision_makers — who to actually reach out to.
+# --------------------------------------------------------------------------- #
+FIND_DECISION_MAKERS_TOOL: dict[str, Any] = {
+    "name": "find_decision_makers",
+    "description": (
+        "Find likely decision-makers / key contacts at a company (name, title, "
+        "LinkedIn). Call this AFTER search_company, once you know the company, to "
+        "identify who a salesperson should reach out to for an overseas B2B deal."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "company": {
+                "type": "string",
+                "description": "The company name (as resolved by search_company).",
+            }
+        },
+        "required": ["company"],
+    },
+}
+
+# Seeded contacts, keyed by the same lowercase keys as _SEEDED.
+_SEEDED_CONTACTS: dict[str, list[dict[str, Any]]] = {
+    "northwind logistics": [
+        {
+            "name": "Sven de Vries",
+            "title": "VP of International Expansion",
+            "linkedin": "linkedin.com/in/sven-de-vries",
+            "note": "负责东南亚航线拓展，出海决策的直接相关人。",
+        },
+        {
+            "name": "Maaike Jansen",
+            "title": "Head of Sales Operations",
+            "linkedin": "linkedin.com/in/maaike-jansen",
+            "note": "管理销售流程与工具采购。",
+        },
+    ],
+    "lumen analytics": [
+        {
+            "name": "Daniel Reyes",
+            "title": "Co-founder & CEO",
+            "linkedin": "linkedin.com/in/daniel-reyes",
+            "note": "早期公司，CEO 通常亲自决策海外扩张。",
+        },
+        {
+            "name": "Priya Nair",
+            "title": "Head of Growth",
+            "linkedin": "linkedin.com/in/priya-nair",
+            "note": "主导多语言上线与获客增长。",
+        },
+    ],
+    "aurora outdoor": [
+        {
+            "name": "Hannah Brooks",
+            "title": "Director of E-commerce",
+            "linkedin": "linkedin.com/in/hannah-brooks",
+            "note": "负责 DTC 与渠道增长，对获客 ROI 敏感。",
+        },
+        {
+            "name": "Marcus Cole",
+            "title": "Head of Supply Chain",
+            "linkedin": "linkedin.com/in/marcus-cole",
+            "note": "供应链高度集中，相关风险的关键人。",
+        },
+    ],
+}
+
+
+def _generated_contacts(company: str) -> list[dict[str, Any]]:
+    """Deterministic fallback contacts for unknown companies."""
+    seed = int(hashlib.sha256(company.lower().encode()).hexdigest(), 16)
+    first = ["Alex", "Jordan", "Taylor", "Morgan", "Chris", "Sam"]
+    last = ["Lee", "Patel", "Garcia", "Müller", "Tanaka", "Novak"]
+    titles = ["VP of Sales", "Head of Growth", "Chief Revenue Officer", "Director of BD"]
+
+    def person(i: int) -> dict[str, Any]:
+        fn = first[(seed + i) % len(first)]
+        ln = last[(seed + i * 3) % len(last)]
+        return {
+            "name": f"{fn} {ln}",
+            "title": titles[(seed + i) % len(titles)],
+            "linkedin": f"linkedin.com/in/{fn.lower()}-{ln.lower()}",
+            "note": "基于查询确定性生成的 mock 联系人。",
+        }
+
+    return [person(0), person(1)]
+
+
+def find_decision_makers(company: str) -> dict[str, Any]:
+    """Return (mock) key contacts for a company."""
+    seed_key = _match_seed_key(company)
+    contacts = _SEEDED_CONTACTS[seed_key] if seed_key is not None else _generated_contacts(company)
+    return {"company": company, "contacts": contacts}

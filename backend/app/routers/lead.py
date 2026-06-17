@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from ..config import VERSION
 from ..schemas import LeadBrief, LeadRequest
 from ..services.agent import AgentError, run_lead_agent
 from ..services.llm import get_client
@@ -17,8 +18,8 @@ router = APIRouter(prefix="/api", tags=["lead"])
 
 @router.get("/health")
 def health() -> dict[str, object]:
-    """Liveness check; also reports whether a real LLM is configured."""
-    return {"status": "ok", "llm": "claude" if get_client() else "stub"}
+    """Liveness check; also reports version and whether a real LLM is configured."""
+    return {"status": "ok", "version": VERSION, "llm": "claude" if get_client() else "stub"}
 
 
 @router.post("/lead", response_model=LeadBrief)
