@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { postLead } from "./api.js";
+import { postLead } from "./api/client.js";
 import BriefView from "./components/BriefView.jsx";
 import TraceView from "./components/TraceView.jsx";
 

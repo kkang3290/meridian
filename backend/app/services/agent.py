@@ -14,8 +14,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .llm import MODEL, get_client
-from .schemas import CompanyOverview, LeadBrief, TraceStep
+from ..config import MAX_TOKENS, MAX_TOOL_ITERS, MODEL
+from ..schemas import CompanyOverview, LeadBrief, TraceStep
+from .llm import get_client
 from .tools import SEARCH_COMPANY_TOOL, search_company
 
 
@@ -24,6 +25,7 @@ class AgentError(Exception):
 
     Carries a message safe to show the client; the API maps it to a 502.
     """
+
 
 SYSTEM_PROMPT = """\
 你是子午线（Meridian）的 AI 销售研究助手，专注于帮助企业完成「B2B 出海获客」。
@@ -66,11 +68,6 @@ LEAD_BRIEF_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-_MAX_TOOL_ITERS = 4
-# Shared by adaptive thinking AND the visible output, so keep headroom — a tight
-# cap can truncate the phase-2 JSON (stop_reason "max_tokens") and break parsing.
-_MAX_TOKENS = 8000
-
 
 def run_lead_agent(user_input: str) -> LeadBrief:
     """Produce a structured lead brief for the given company input."""
@@ -90,10 +87,10 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
     ]
 
     # Phase 1 — gather: let the model call search_company until it's satisfied.
-    for _ in range(_MAX_TOOL_ITERS):
+    for _ in range(MAX_TOOL_ITERS):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=[SEARCH_COMPANY_TOOL],
             thinking={"type": "adaptive", "display": "summarized"},
@@ -148,7 +145,7 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
     )
     final = client.messages.create(
         model=MODEL,
-        max_tokens=_MAX_TOKENS,
+        max_tokens=MAX_TOKENS,
         system=SYSTEM_PROMPT,
         thinking={"type": "adaptive", "display": "summarized"},
         output_config={"format": {"type": "json_schema", "schema": LEAD_BRIEF_SCHEMA}},

@@ -12,7 +12,7 @@ os.environ.pop("ANTHROPIC_API_KEY", None)  # force the stub path
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.main import app  # noqa: E402
-from app.tools import search_company  # noqa: E402
+from app.services.tools import search_company  # noqa: E402
 
 client = TestClient(app)
 

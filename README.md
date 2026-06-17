@@ -101,14 +101,14 @@ cd backend && source .venv/bin/activate && pytest -q
 
 ## Agent 设计
 
-核心在 `backend/app/agent.py`。这是一个**手写的 Agent 循环**（没有用 SDK 的 tool-runner），目的就是把每一步都记录进 `trace`，让评审能看清 Agent「怎么想、怎么调工具」。
+核心在 `backend/app/services/agent.py`。这是一个**手写的 Agent 循环**（没有用 SDK 的 tool-runner），目的就是把每一步都记录进 `trace`，让评审能看清 Agent「怎么想、怎么调工具」。
 
 分两个阶段：
 
 1. **Gather（调研）** —— 带 `search_company` 工具循环调用 Claude。`stop_reason == "tool_use"` 时执行工具、把结果回灌，并把 thinking / tool_call / tool_result 写入轨迹；带最大轮数上限防止失控。
 2. **Structure（结构化）** —— 最后一次调用使用 `output_config.format`（JSON Schema 严格模式）强制产出四个字段的合法 JSON，无需正则解析。
 
-**工具**（`backend/app/tools.py`）：`search_company(query)` 返回 mock 的公司事实。内置几个典型出海客户画像（垂直 SaaS / 制造业 / DTC 电商），其余查询用基于哈希的**确定性生成**兜底，保证 Agent 永远有可推理的数据。按作业要求，数据真假不是重点，重点是工具调用的设计与全栈打通。
+**工具**（`backend/app/services/tools.py`）：`search_company(query)` 返回 mock 的公司事实。内置几个典型出海客户画像（垂直 SaaS / 制造业 / DTC 电商），其余查询用基于哈希的**确定性生成**兜底，保证 Agent 永远有可推理的数据。按作业要求，数据真假不是重点，重点是工具调用的设计与全栈打通。
 
 **模型**：`claude-opus-4-8`，开启 adaptive thinking（`display: "summarized"`，因此轨迹里能看到思考摘要）。
 
@@ -130,21 +130,26 @@ cd backend && source .venv/bin/activate && pytest -q
 ```
 backend/
   app/
-    main.py      # FastAPI：POST /api/lead, GET /api/health, CORS, 错误处理
-    agent.py     # Agent 循环（真实 Claude）+ stub；结构化输出 schema
-    tools.py     # search_company 工具 + mock 数据
-    llm.py       # provider seam：有无密钥决定走真实 / stub
-    schemas.py   # Pydantic 模型（请求 / 简报 / 轨迹）
-  tests/test_lead.py  # smoke 测试（走 stub，无需密钥）
+    main.py              # 应用工厂：create_app() + CORS + 挂载路由
+    config.py            # 设置/常量（MODEL、MAX_TOKENS、密钥读取）
+    schemas.py           # Pydantic 模型（请求 / 简报 / 轨迹）
+    routers/
+      lead.py            # APIRouter：POST /api/lead, GET /api/health, 错误处理
+    services/
+      agent.py           # Agent 循环（真实 Claude）+ stub；结构化输出 schema
+      tools.py           # search_company 工具 + mock 数据
+      llm.py             # provider seam：有无密钥决定走真实 / stub
+  tests/test_lead.py     # smoke 测试（走 stub，无需密钥）
   requirements.txt
   .env.example
 frontend/
   src/
+    main.jsx                 # 入口
     App.jsx                  # 输入 + loading/error/result 状态
-    api.js                   # POST /api/lead
+    index.css
+    api/client.js            # POST /api/lead
     components/BriefView.jsx # 简报卡片（开场白高亮 + 复制）
     components/TraceView.jsx # 可折叠的 Agent 轨迹时间线
-    index.css
   vite.config.js             # /api 代理到 :8000
 ```
 
