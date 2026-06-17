@@ -9,10 +9,11 @@
 ## 它能做什么
 
 - **输入**：公司名（`Northwind Logistics`）、网址（`https://acme-robotics.com`）或一句话描述。
+- **LLM**：通义千问（Qwen，默认 `qwen-plus`），通过 DashScope 的 **OpenAI 兼容接口**调用；切换 provider 只需改 `services/llm.py` 一个文件。
 - **Agent（多工具循环）**：由 LLM 自主编排两个工具 —— 先 `search_company` 收集事实，再 `find_decision_makers` 找关键决策人，然后据此推理。
 - **结构化输出**：公司概况、可能的痛点、推荐的出海/外联切入点、一句话开场白（outreach opener）、关键联系人。
 - **轨迹**：返回完整的 thinking / tool_call / tool_result / final 轨迹，前端以时间线展示。
-- **零配置可运行**：未设置 `ANTHROPIC_API_KEY` 时自动走**确定性 stub**，全栈可在无密钥、无网络的情况下跑通。
+- **零配置可运行**：未设置 `DASHSCOPE_API_KEY` 时自动走**确定性 stub**，全栈可在无密钥、无网络的情况下跑通。
 
 ---
 
@@ -21,12 +22,6 @@
 | 输入 | 结构化简报 |
 | --- | --- |
 | ![输入](docs/screenshots/01-input.png) | ![简报](docs/screenshots/02-brief.png) |
-
-| Agent 轨迹（多工具） | 错误状态 |
-| --- | --- |
-| ![轨迹](docs/screenshots/03-trace.png) | ![错误](docs/screenshots/04-error.png) |
-
-> 截图为 **stub 模式**（无需密钥）运行结果；轨迹清晰展示了 `search_company` → `find_decision_makers` 的多工具编排。
 
 ---
 
@@ -41,14 +36,14 @@ cd backend
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 可选：使用真实 Claude Agent。不设置则走 stub。
-cp .env.example .env          # 然后在 .env 里填入 ANTHROPIC_API_KEY
-# 或：export ANTHROPIC_API_KEY=sk-ant-...
+# 可选：使用真实 Qwen（通义千问）Agent。不设置则走 stub。
+cp .env.example .env          # 然后在 .env 里填入 DASHSCOPE_API_KEY
+# 或：export DASHSCOPE_API_KEY=sk-...   （可选 QWEN_MODEL，默认 qwen-plus）
 
 uvicorn app.main:app --reload --port 8000
 ```
 
-健康检查：`curl localhost:8000/api/health` → `{"status":"ok","llm":"stub"}`（或 `"claude"`）。
+健康检查：`curl localhost:8000/api/health` → `{"status":"ok","version":"1.2.0","llm":"stub"}`（配置密钥后为 `"qwen"`）。
 
 ### 2) 前端（Vite + React，默认 5173 端口）
 
@@ -76,7 +71,7 @@ curl -X POST localhost:8000/api/lead \
 cd backend && source .venv/bin/activate && pytest -q
 ```
 
-覆盖：响应契约（字段齐全 + 关键联系人）、轨迹包含两个工具的完整 tool_call → tool_result 编排、空输入被拒（422）、以及两个工具的解析与确定性。
+覆盖：响应契约（字段齐全 + 关键联系人）、轨迹包含两个工具的完整 tool_call → tool_result 编排、空输入被拒（422）、两个工具的解析与确定性，以及用 **fake OpenAI 客户端**驱动真实 Qwen 工具调用循环（`_run_with_qwen`），无需联网即可覆盖 Agent 主逻辑。
 
 ---
 
@@ -124,8 +119,8 @@ cd backend && source .venv/bin/activate && pytest -q
 
 分两个阶段：
 
-1. **Gather（调研）** —— 带两个工具循环调用 Claude。`stop_reason == "tool_use"` 时按工具名分发执行（`EXECUTORS` 映射）、把结果回灌，并把 thinking / tool_call / tool_result 写入轨迹；带最大轮数上限防止失控。新增工具只需在 `TOOLS` 加 schema、`EXECUTORS` 加一行，循环本身与具体工具解耦。
-2. **Structure（结构化）** —— 最后一次调用使用 `output_config.format`（JSON Schema 严格模式）强制产出结构化 JSON，无需正则解析。
+1. **Gather（调研）** —— 带两个工具（OpenAI function 格式）循环调用 Qwen。返回 `tool_calls` 时按工具名分发执行（`EXECUTORS` 映射）、把结果以 `role:"tool"` 回灌，并把 thinking / tool_call / tool_result 写入轨迹；带最大轮数上限防止失控。新增工具只需在 `TOOLS` 加 schema、`EXECUTORS` 加一行，循环本身与具体工具解耦。
+2. **Structure（结构化）** —— 最后一次调用使用 `response_format: {"type":"json_object"}`（JSON 模式），按提示词约定的字段产出 JSON，再用 Pydantic 模型（`LeadBrief` 等）校验，无需正则解析。
 
 **工具**（`backend/app/services/tools.py`，均为 mock）：
 - `search_company(query)` —— 返回公司事实（行业、规模、总部、产品、近期信号）。
@@ -133,7 +128,7 @@ cd backend && source .venv/bin/activate && pytest -q
 
 内置几个典型出海客户画像（垂直 SaaS / 制造业 / DTC 电商），其余查询用基于哈希的**确定性生成**兜底，保证 Agent 永远有可推理的数据。按作业要求，数据真假不是重点，重点是工具调用的设计与全栈打通。
 
-**模型**：`claude-opus-4-8`，开启 adaptive thinking（`display: "summarized"`，因此轨迹里能看到思考摘要）。
+**模型**：默认 `qwen-plus`（可用 `QWEN_MODEL` 覆盖，如 `qwen-max`）。若使用支持思考的 Qwen 模型（qwen3 / qwq），其 `reasoning_content` 会作为 thinking 步写入轨迹。
 
 ---
 
@@ -141,7 +136,8 @@ cd backend && source .venv/bin/activate && pytest -q
 
 - **手写循环而非 tool-runner**：tool-runner 更省代码，但会把中间步骤藏起来。作业明确要看 Agent 轨迹，所以选择手写循环换取可观测性。
 - **Stub 兜底**：没有密钥也能完整跑通全栈，评审零成本上手；`used_stub` 字段诚实地标注是哪条路径产出的结果。Stub 复用同一套工具与轨迹结构，不是另起一套假数据。
-- **两阶段（gather → structure）**：把"调研"和"出结构化结果"分开，让结构化输出走 JSON Schema 严格校验，省掉脆弱的字符串解析，前端拿到的一定是合法结构。
+- **两阶段（gather → structure）**：把"调研"和"出结构化结果"分开，让结构化输出走 JSON 模式 + Pydantic 校验，省掉脆弱的字符串解析，前端拿到的一定是合法结构。
+- **OpenAI 兼容接口接 Qwen**：用 `openai` SDK 指向 DashScope，复用成熟的 function-calling 协议；provider 切换集中在 `services/llm.py`，换 OpenAI / 其它兼容厂商只改一处。
 - **内存即可、无数据库**：符合约束；Agent 无状态，每次请求独立。
 - **Mock 工具数据**：把时间投在 Agent 循环、轨迹设计和前端联调上，而不是去接真实数据源。
 - **产品 sense**：一句话开场白单独高亮、一键复制，并自然点名关键决策人；「关键联系人」卡片直接回答销售「该联系谁」。

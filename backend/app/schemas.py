@@ -65,6 +65,6 @@ class LeadBrief(BaseModel):
     outreach_opener: str
     key_contacts: list[Contact] = Field(default_factory=list)
     trace: list[TraceStep] = Field(default_factory=list)
-    # True when the deterministic stub ran (no ANTHROPIC_API_KEY); surfaced so
+    # True when the deterministic stub ran (no DASHSCOPE_API_KEY); surfaced so
     # the UI and reviewer can tell which path produced the result.
     used_stub: bool = False

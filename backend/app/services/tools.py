@@ -12,27 +12,29 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-# JSON Schema advertised to Claude. The description tells the model *when* to
-# reach for the tool (recent Opus models call tools more conservatively, so the
-# trigger condition earns its place in the description).
+# OpenAI-compatible function schema advertised to Qwen. The description tells
+# the model *when* to reach for the tool, which improves tool-selection.
 SEARCH_COMPANY_TOOL: dict[str, Any] = {
-    "name": "search_company",
-    "description": (
-        "Look up a company to gather firmographic facts (industry, size, "
-        "headquarters, products, recent signals). Call this whenever you need "
-        "concrete information about the target company before writing the sales "
-        "brief — do not answer from memory alone. Accepts a company name, a "
-        "website/domain, or a short description."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "Company name, website/domain, or short description.",
-            }
+    "type": "function",
+    "function": {
+        "name": "search_company",
+        "description": (
+            "Look up a company to gather firmographic facts (industry, size, "
+            "headquarters, products, recent signals). Call this whenever you need "
+            "concrete information about the target company before writing the sales "
+            "brief — do not answer from memory alone. Accepts a company name, a "
+            "website/domain, or a short description."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Company name, website/domain, or short description.",
+                }
+            },
+            "required": ["query"],
         },
-        "required": ["query"],
     },
 }
 
@@ -156,21 +158,24 @@ def search_company(query: str) -> dict[str, Any]:
 # Tool 2: find_decision_makers — who to actually reach out to.
 # --------------------------------------------------------------------------- #
 FIND_DECISION_MAKERS_TOOL: dict[str, Any] = {
-    "name": "find_decision_makers",
-    "description": (
-        "Find likely decision-makers / key contacts at a company (name, title, "
-        "LinkedIn). Call this AFTER search_company, once you know the company, to "
-        "identify who a salesperson should reach out to for an overseas B2B deal."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "company": {
-                "type": "string",
-                "description": "The company name (as resolved by search_company).",
-            }
+    "type": "function",
+    "function": {
+        "name": "find_decision_makers",
+        "description": (
+            "Find likely decision-makers / key contacts at a company (name, title, "
+            "LinkedIn). Call this AFTER search_company, once you know the company, to "
+            "identify who a salesperson should reach out to for an overseas B2B deal."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "company": {
+                    "type": "string",
+                    "description": "The company name (as resolved by search_company).",
+                }
+            },
+            "required": ["company"],
         },
-        "required": ["company"],
     },
 }
 

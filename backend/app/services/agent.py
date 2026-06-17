@@ -1,8 +1,9 @@
 """The lead-research agent.
 
 Two entry points share the same output shape (`LeadBrief`):
-  - `_run_with_claude`: a manual agentic loop so every step (thinking, tool
-    call, tool result, final) is captured into a trace the reviewer can read.
+  - `_run_with_qwen`: a manual agentic loop over Qwen (通义千问) via its
+    OpenAI-compatible API, so every step (thinking, tool call, tool result,
+    final) is captured into a trace the reviewer can read.
   - `_run_stub`: a deterministic stand-in used when no API key is present, so
     the full stack runs with zero setup. It mimics the same trace shape.
 
@@ -53,55 +54,18 @@ SYSTEM_PROMPT = """\
 
 要求：内容务实、贴近销售场景；痛点要由数据支撑；开场白要像真人写的、能直接发出去。"""
 
-# Structured-output schema for phase 2. The schema stays strict (every property
-# required, additionalProperties false); optional facts are made nullable via
-# anyOf so the model can omit unknown values without breaking validation.
-LEAD_BRIEF_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "company_overview": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                # Optional facts use anyOf(string|null) rather than a JSON-Schema
-                # type-array — structured outputs documents anyOf but not
-                # `{"type": ["string","null"]}`, which can be rejected at compile.
-                "website": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "industry": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "size": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "headquarters": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                "summary": {"type": "string"},
-            },
-            "required": ["name", "website", "industry", "size", "headquarters", "summary"],
-            "additionalProperties": False,
-        },
-        "pain_points": {"type": "array", "items": {"type": "string"}},
-        "outreach_angles": {"type": "array", "items": {"type": "string"}},
-        "outreach_opener": {"type": "string"},
-        "key_contacts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "title": {"type": "string"},
-                    "linkedin": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                    "note": {"anyOf": [{"type": "string"}, {"type": "null"}]},
-                },
-                "required": ["name", "title", "linkedin", "note"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    "required": [
-        "company_overview",
-        "pain_points",
-        "outreach_angles",
-        "outreach_opener",
-        "key_contacts",
-    ],
-    "additionalProperties": False,
-}
+# Phase-2 instruction. Qwen's JSON mode (response_format json_object) needs the
+# word "json" present and the shape described in the prompt; the result is then
+# validated by the Pydantic models below, which are the real contract.
+STRUCTURE_INSTRUCTION = (
+    "现在，基于以上调研，只返回一个 JSON 对象作为最终的结构化销售线索简报，"
+    "不要任何额外文字、解释或 markdown 代码块。字段如下：\n"
+    "- company_overview: 对象 { name, website, industry, size, headquarters, summary }，未知字段填 null\n"
+    "- pain_points: 字符串数组（由数据支撑的痛点）\n"
+    "- outreach_angles: 字符串数组（出海 / 外联切入点）\n"
+    "- outreach_opener: 字符串（一句话开场白）\n"
+    "- key_contacts: 对象数组 { name, title, linkedin, note }，未知字段填 null"
+)
 
 
 def run_lead_agent(user_input: str) -> LeadBrief:
@@ -109,106 +73,110 @@ def run_lead_agent(user_input: str) -> LeadBrief:
     client = get_client()
     if client is None:
         return _run_stub(user_input)
-    return _run_with_claude(client, user_input)
+    return _run_with_qwen(client, user_input)
 
 
 # --------------------------------------------------------------------------- #
-# Real agent: manual loop over the Claude Messages API.
+# Real agent: manual loop over Qwen via its OpenAI-compatible chat API.
 # --------------------------------------------------------------------------- #
-def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
+def _safe_args(raw: str | None) -> dict[str, Any]:
+    """Parse a tool-call arguments JSON string, tolerating empty/invalid input."""
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+
+def _assistant_msg(msg: Any) -> dict[str, Any]:
+    """Rebuild the assistant turn (incl. tool_calls) to append to history."""
+    out: dict[str, Any] = {"role": "assistant", "content": msg.content or ""}
+    if msg.tool_calls:
+        out["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in msg.tool_calls
+        ]
+    return out
+
+
+def _run_with_qwen(client: Any, user_input: str) -> LeadBrief:
     trace: list[TraceStep] = []
     messages: list[dict[str, Any]] = [
-        {"role": "user", "content": f"目标公司输入：{user_input}\n\n请研究该公司并准备销售线索简报。"}
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": f"目标公司输入：{user_input}\n\n请研究该公司并准备销售线索简报。"},
     ]
 
-    # Phase 1 — gather: let the model call the tools until it's satisfied.
+    # Phase 1 — gather: OpenAI-style tool-calling loop until the model stops.
     for _ in range(MAX_TOOL_ITERS):
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            tools=TOOLS,
-            thinking={"type": "adaptive", "display": "summarized"},
             messages=messages,
+            tools=TOOLS,
+            max_tokens=MAX_TOKENS,
         )
+        msg = response.choices[0].message
 
-        tool_uses = []
-        for block in response.content:
-            if block.type == "thinking" and getattr(block, "thinking", ""):
-                trace.append(TraceStep(type="thinking", label="模型推理", detail=block.thinking))
-            elif block.type == "tool_use":
-                tool_uses.append(block)
-                trace.append(
-                    TraceStep(
-                        type="tool_call",
-                        label=f"调用工具 {block.name}",
-                        data=block.input,
-                    )
-                )
+        # Some Qwen (qwen3 / qwq) thinking models expose reasoning_content.
+        reasoning = getattr(msg, "reasoning_content", None)
+        if reasoning:
+            trace.append(TraceStep(type="thinking", label="模型推理", detail=reasoning))
 
-        messages.append({"role": "assistant", "content": response.content})
+        messages.append(_assistant_msg(msg))
 
-        if response.stop_reason != "tool_use":
+        if not msg.tool_calls:
             break
 
-        tool_results = []
-        for tu in tool_uses:
-            executor = EXECUTORS.get(tu.name)
-            if executor is None:
-                result: Any = {"error": f"unknown tool: {tu.name}"}
-            else:
-                result = executor(tu.input, user_input)
+        for tc in msg.tool_calls:
+            name = tc.function.name
+            args = _safe_args(tc.function.arguments)
+            trace.append(TraceStep(type="tool_call", label=f"调用工具 {name}", data=args))
+
+            executor = EXECUTORS.get(name)
+            result: Any = executor(args, user_input) if executor else {"error": f"unknown tool: {name}"}
             trace.append(
                 TraceStep(
                     type="tool_result",
-                    label=f"{tu.name} 返回结果",
+                    label=f"{name} 返回结果",
                     detail=result.get("name") or result.get("company"),
                     data=result,
                 )
             )
-            tool_results.append(
+            messages.append(
                 {
-                    "type": "tool_result",
-                    "tool_use_id": tu.id,
+                    "role": "tool",
+                    "tool_call_id": tc.id,
                     "content": json.dumps(result, ensure_ascii=False),
                 }
             )
-        messages.append({"role": "user", "content": tool_results})
 
-    # Phase 2 — structure: force the four output fields as validated JSON.
-    messages.append(
-        {
-            "role": "user",
-            "content": "现在，基于以上调研，输出最终的结构化销售线索简报。",
-        }
-    )
-    final = client.messages.create(
+    # Phase 2 — structure: JSON mode (validated by the Pydantic models below).
+    messages.append({"role": "user", "content": STRUCTURE_INSTRUCTION})
+    final = client.chat.completions.create(
         model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        thinking={"type": "adaptive", "display": "summarized"},
-        output_config={"format": {"type": "json_schema", "schema": LEAD_BRIEF_SCHEMA}},
         messages=messages,
+        max_tokens=MAX_TOKENS,
+        response_format={"type": "json_object"},
     )
-    for block in final.content:
-        if block.type == "thinking" and getattr(block, "thinking", ""):
-            trace.append(TraceStep(type="thinking", label="模型推理（整理简报）", detail=block.thinking))
+    choice = final.choices[0]
+    reasoning = getattr(choice.message, "reasoning_content", None)
+    if reasoning:
+        trace.append(TraceStep(type="thinking", label="模型推理（整理简报）", detail=reasoning))
 
-    # Guard the structured turn: a refusal or a max_tokens truncation yields no
-    # parseable JSON. Fail with a clear message instead of a StopIteration /
-    # JSONDecodeError surfacing as an opaque 500.
-    if final.stop_reason == "refusal":
-        raise AgentError("模型拒绝了该请求（safety refusal），请换一个输入再试。")
-
-    payload_text = next((b.text for b in final.content if b.type == "text"), None)
-    if payload_text is None:
-        raise AgentError(f"未能生成结构化简报（stop_reason={final.stop_reason}）。")
+    # Guard the structured turn: empty or truncated output yields no parseable
+    # JSON. Fail with a clear message instead of an opaque 500.
+    payload_text = choice.message.content
+    if not payload_text:
+        raise AgentError(f"未能生成结构化简报（finish_reason={choice.finish_reason}）。")
     try:
         data = json.loads(payload_text)
     except json.JSONDecodeError as exc:
-        # Most likely cause: output truncated at max_tokens.
         raise AgentError(
-            f"结构化输出解析失败（stop_reason={final.stop_reason}），可能因输出被截断。"
+            f"结构化输出解析失败（finish_reason={choice.finish_reason}），可能因输出被截断。"
         ) from exc
     trace.append(TraceStep(type="final", label="生成结构化简报", data=data))
 
@@ -232,7 +200,7 @@ def _run_stub(user_input: str) -> LeadBrief:
             type="thinking",
             label="模型推理",
             detail=(
-                "未配置 ANTHROPIC_API_KEY，使用确定性 stub。先用 search_company 收集事实，"
+                "未配置 DASHSCOPE_API_KEY，使用确定性 stub。先用 search_company 收集事实，"
                 "再用 find_decision_makers 找关键联系人，最后据此撰写简报。"
             ),
         ),
