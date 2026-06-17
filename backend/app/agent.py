@@ -18,6 +18,13 @@ from .llm import MODEL, get_client
 from .schemas import CompanyOverview, LeadBrief, TraceStep
 from .tools import SEARCH_COMPANY_TOOL, search_company
 
+
+class AgentError(Exception):
+    """Expected, user-facing agent failure (refusal, truncation, bad output).
+
+    Carries a message safe to show the client; the API maps it to a 502.
+    """
+
 SYSTEM_PROMPT = """\
 你是子午线（Meridian）的 AI 销售研究助手，专注于帮助企业完成「B2B 出海获客」。
 给定一个目标公司（名称 / 网址 / 一句话描述），你的工作是产出一份对真实销售有用的「销售线索简报」。
@@ -29,9 +36,9 @@ SYSTEM_PROMPT = """\
 
 要求：内容务实、贴近销售场景；痛点要由数据支撑；开场白要像真人写的、能直接发出去。"""
 
-# Structured-output schema for phase 2. Optional fields use ["string", "null"]
-# so the schema stays strict (every property required, additionalProperties
-# false) while still allowing the model to omit unknown facts.
+# Structured-output schema for phase 2. The schema stays strict (every property
+# required, additionalProperties false); optional facts are made nullable via
+# anyOf so the model can omit unknown values without breaking validation.
 LEAD_BRIEF_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -39,10 +46,13 @@ LEAD_BRIEF_SCHEMA: dict[str, Any] = {
             "type": "object",
             "properties": {
                 "name": {"type": "string"},
-                "website": {"type": ["string", "null"]},
-                "industry": {"type": ["string", "null"]},
-                "size": {"type": ["string", "null"]},
-                "headquarters": {"type": ["string", "null"]},
+                # Optional facts use anyOf(string|null) rather than a JSON-Schema
+                # type-array — structured outputs documents anyOf but not
+                # `{"type": ["string","null"]}`, which can be rejected at compile.
+                "website": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "industry": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "size": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                "headquarters": {"anyOf": [{"type": "string"}, {"type": "null"}]},
                 "summary": {"type": "string"},
             },
             "required": ["name", "website", "industry", "size", "headquarters", "summary"],
@@ -57,6 +67,9 @@ LEAD_BRIEF_SCHEMA: dict[str, Any] = {
 }
 
 _MAX_TOOL_ITERS = 4
+# Shared by adaptive thinking AND the visible output, so keep headroom — a tight
+# cap can truncate the phase-2 JSON (stop_reason "max_tokens") and break parsing.
+_MAX_TOKENS = 8000
 
 
 def run_lead_agent(user_input: str) -> LeadBrief:
@@ -80,7 +93,7 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
     for _ in range(_MAX_TOOL_ITERS):
         response = client.messages.create(
             model=MODEL,
-            max_tokens=4000,
+            max_tokens=_MAX_TOKENS,
             system=SYSTEM_PROMPT,
             tools=[SEARCH_COMPANY_TOOL],
             thinking={"type": "adaptive", "display": "summarized"},
@@ -135,7 +148,7 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
     )
     final = client.messages.create(
         model=MODEL,
-        max_tokens=4000,
+        max_tokens=_MAX_TOKENS,
         system=SYSTEM_PROMPT,
         thinking={"type": "adaptive", "display": "summarized"},
         output_config={"format": {"type": "json_schema", "schema": LEAD_BRIEF_SCHEMA}},
@@ -145,8 +158,22 @@ def _run_with_claude(client: Any, user_input: str) -> LeadBrief:
         if block.type == "thinking" and getattr(block, "thinking", ""):
             trace.append(TraceStep(type="thinking", label="模型推理（整理简报）", detail=block.thinking))
 
-    payload_text = next(b.text for b in final.content if b.type == "text")
-    data = json.loads(payload_text)
+    # Guard the structured turn: a refusal or a max_tokens truncation yields no
+    # parseable JSON. Fail with a clear message instead of a StopIteration /
+    # JSONDecodeError surfacing as an opaque 500.
+    if final.stop_reason == "refusal":
+        raise AgentError("模型拒绝了该请求（safety refusal），请换一个输入再试。")
+
+    payload_text = next((b.text for b in final.content if b.type == "text"), None)
+    if payload_text is None:
+        raise AgentError(f"未能生成结构化简报（stop_reason={final.stop_reason}）。")
+    try:
+        data = json.loads(payload_text)
+    except json.JSONDecodeError as exc:
+        # Most likely cause: output truncated at max_tokens.
+        raise AgentError(
+            f"结构化输出解析失败（stop_reason={final.stop_reason}），可能因输出被截断。"
+        ) from exc
     trace.append(TraceStep(type="final", label="生成结构化简报", data=data))
 
     return LeadBrief(

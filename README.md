@@ -54,6 +54,16 @@ curl -X POST localhost:8000/api/lead \
   -d '{"input":"Northwind Logistics"}'
 ```
 
+### 测试
+
+后端带一组 hermetic 的 smoke 测试（走 stub 路径，无需密钥）：
+
+```bash
+cd backend && source .venv/bin/activate && pytest -q
+```
+
+覆盖：响应契约（四个字段齐全）、轨迹中包含完整的 tool_call → tool_result → final、空输入被拒（422）、以及工具的 URL 解析与确定性。
+
 ---
 
 ## API
@@ -125,6 +135,7 @@ backend/
     tools.py     # search_company 工具 + mock 数据
     llm.py       # provider seam：有无密钥决定走真实 / stub
     schemas.py   # Pydantic 模型（请求 / 简报 / 轨迹）
+  tests/test_lead.py  # smoke 测试（走 stub，无需密钥）
   requirements.txt
   .env.example
 frontend/
@@ -150,6 +161,6 @@ frontend/
 - **真实工具**：把 `search_company` 换成真实的 web search / 抓取（保留 mock 作为离线兜底），并加入第二个工具（如 `find_contacts` 找决策人邮箱），展示多工具编排。
 - **流式轨迹**：用 SSE 把 thinking / tool_call 实时推到前端，让用户看着 Agent 一步步工作，而不是等最终结果。
 - **缓存与并发**：对相同公司做 prompt caching / 结果缓存；批量输入一次性生成多家简报。
-- **可评估性**：加一个小 eval 集（输入 → 期望字段质量）和 pytest，回归 Agent 行为；记录每次调用的 token / 耗时。
+- **可评估性**：在现有 smoke 测试之上加一个 eval 集（输入 → 期望字段质量），用真实 Claude 路径回归 Agent 行为；记录每次调用的 token / 耗时。
 - **持久化与导出**：把简报存起来、支持导出 CSV / 推送到 CRM。
 - **更强的产品化**：开场白多版本 A/B、按地区/行业的切入点模板、置信度标注（哪些来自工具、哪些是推断）。

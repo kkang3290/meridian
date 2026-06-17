@@ -7,7 +7,7 @@ import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .agent import run_lead_agent
+from .agent import AgentError, run_lead_agent
 from .llm import get_client
 from .schemas import LeadBrief, LeadRequest
 
@@ -36,6 +36,10 @@ def create_lead(req: LeadRequest) -> LeadBrief:
     """Run the agent and return the structured brief + trace."""
     try:
         return run_lead_agent(req.input)
+    except AgentError as exc:
+        # Expected failure (refusal / truncation) — message is safe to show.
+        logger.warning("lead agent declined: %s", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 — surface a clean error to the client
         logger.exception("lead agent failed")
         raise HTTPException(status_code=500, detail=f"Agent failed: {exc}") from exc
